@@ -318,6 +318,12 @@ elif [ "${token_type}" = char ]; then
 elif [ "${token_type}" = word ]; then
     token_list="${wordtoken_list}"
     bpemodel=none
+elif [ "${token_type}" = whisper_en ]; then # should make token_list an output filepath here
+    token_list="${token_listdir}"/whisper_en/tokens.txt
+    bpemodel=whisper_en
+elif [ "${token_type}" = whisper_multilingual ]; then
+    token_list="${token_listdir}"/whisper_multilingual/tokens.txt
+    bpemodel=whisper_multilingual
 else
     log "Error: not supported --token_type '${token_type}'"
     exit 2
@@ -690,7 +696,15 @@ if ! "${skip_data_prep}"; then
                 --add_symbol "${blank}:0" \
                 --add_symbol "${oov}:1" \
                 --add_symbol "${sos_eos}:-1"
+        elif grep -q "whisper" <<< ${token_type}; then
+            log "Stage 5: Generate whisper token_list from ${token_type} tokenizer"
 
+            # The first symbol in token_list must be "<blank>" and the last must be also sos/eos:
+            # 0 is reserved for CTC-blank for ASR and also used as ignore-index in the other task
+            echo ${token_list}
+            ${python} -m espnet2.bin.whisper_export_vocabulary  \
+                --whisper_model "${token_type}" \
+                --output "${token_list}"
         else
             log "Error: not supported --token_type '${token_type}'"
             exit 2
@@ -1329,6 +1343,7 @@ if ! "${skip_eval}"; then
                                   --token_type word \
                                   --non_linguistic_symbols "${nlsyms_txt}" \
                                   --remove_non_linguistic_symbols true \
+                                  --cleaner "${cleaner}" \
                                   ) \
                         <(<"${_data}/utt2spk" awk '{ print "(" $2 "-" $1 ")" }') \
                             >"${_scoredir}/hyp.trn"
@@ -1356,6 +1371,7 @@ if ! "${skip_eval}"; then
                                   --token_type char \
                                   --non_linguistic_symbols "${nlsyms_txt}" \
                                   --remove_non_linguistic_symbols true \
+                                  --cleaner "${cleaner}" \
                                   ) \
                         <(<"${_data}/utt2spk" awk '{ print "(" $2 "-" $1 ")" }') \
                             >"${_scoredir}/hyp.trn"

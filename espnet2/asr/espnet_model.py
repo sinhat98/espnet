@@ -60,16 +60,28 @@ class ESPnetASRModel(AbsESPnetModel):
         sym_space: str = "<space>",
         sym_blank: str = "<blank>",
         extract_feats_in_collect_stats: bool = True,
+        sos_index: int = -1,
+        eos_index: int = -1,
     ):
         assert check_argument_types()
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
         assert 0.0 <= interctc_weight < 1.0, interctc_weight
 
         super().__init__()
-        # note that eos is the same as sos (equivalent ID)
+        # NOTE (Shih-Lun): eos is the same as sos in ESPNet (equivalent ID)
+        #                  sos_index and eos_index were added to arguments
+        #                  to support OpenAI Whisper model
         self.blank_id = 0
-        self.sos = vocab_size - 1
-        self.eos = vocab_size - 1
+        if sos_index == -1:
+            self.sos = vocab_size - 1
+        else:
+            assert sos_index < vocab_size
+            self.sos = sos_index
+        if eos_index == -1:
+            self.eos = vocab_size - 1
+        else:
+            assert eos_index < vocab_size
+            self.eos = eos_index
         self.vocab_size = vocab_size
         self.ignore_id = ignore_id
         self.ctc_weight = ctc_weight
@@ -150,6 +162,8 @@ class ESPnetASRModel(AbsESPnetModel):
             self.ctc = ctc
 
         self.extract_feats_in_collect_stats = extract_feats_in_collect_stats
+
+        self.is_encoder_whisper = "Whisper" in type(self.encoder).__name__
 
     def forward(
         self,
@@ -348,10 +362,13 @@ class ESPnetASRModel(AbsESPnetModel):
             encoder_out.size(),
             speech.size(0),
         )
-        assert encoder_out.size(1) <= encoder_out_lens.max(), (
-            encoder_out.size(),
-            encoder_out_lens.max(),
-        )
+        # NOTE (Shih-Lun): Whisper may pad input wav, 
+        #                  hence should skip this check
+        if not self.is_encoder_whisper:
+            assert encoder_out.size(1) <= encoder_out_lens.max(), (
+                encoder_out.size(),
+                encoder_out_lens.max(),
+            )
 
         if intermediate_outs is not None:
             return (encoder_out, intermediate_outs), encoder_out_lens
@@ -366,11 +383,13 @@ class ESPnetASRModel(AbsESPnetModel):
         # for data-parallel
         speech = speech[:, : speech_lengths.max()]
 
-        if self.frontend is not None:
+        if self.frontend is not None and not self.is_encoder_whisper:
             # Frontend
             #  e.g. STFT and Feature extract
             #       data_loader may send time-domain signal in this case
             # speech (Batch, NSamples) -> feats: (Batch, NFrames, Dim)
+            # NOTE (Shih-Lun): Whisper uses its own log-mel computation,
+            #                  hence should skip this step
             feats, feats_lengths = self.frontend(speech, speech_lengths)
         else:
             # No frontend and no feature extract

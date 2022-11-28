@@ -18,6 +18,7 @@ from espnet2.asr.decoder.transformer_decoder import (
     LightweightConvolutionTransformerDecoder,
     TransformerDecoder,
 )
+from espnet2.asr.decoder.whisper_decoder import OpenAIWhisperDecoder
 from espnet2.asr.encoder.abs_encoder import AbsEncoder
 from espnet2.asr.encoder.branchformer_encoder import BranchformerEncoder
 from espnet2.asr.encoder.conformer_encoder import ConformerEncoder
@@ -36,6 +37,7 @@ from espnet2.asr.encoder.rnn_encoder import RNNEncoder
 from espnet2.asr.encoder.transformer_encoder import TransformerEncoder
 from espnet2.asr.encoder.vgg_rnn_encoder import VGGRNNEncoder
 from espnet2.asr.encoder.wav2vec2_encoder import FairSeqWav2Vec2Encoder
+from espnet2.asr.encoder.whisper_encoder import OpenAIWhisperEncoder
 from espnet2.asr.espnet_model import ESPnetASRModel
 from espnet2.asr.frontend.abs_frontend import AbsFrontend
 from espnet2.asr.frontend.default import DefaultFrontend
@@ -133,6 +135,7 @@ encoder_choices = ClassChoices(
         hubert_pretrain=FairseqHubertPretrainEncoder,
         longformer=LongformerEncoder,
         branchformer=BranchformerEncoder,
+        whisper=OpenAIWhisperEncoder,
     ),
     type_check=AbsEncoder,
     default="rnn",
@@ -157,6 +160,7 @@ decoder_choices = ClassChoices(
         rnn=RNNDecoder,
         transducer=TransducerDecoder,
         mlm=MLMDecoder,
+        whisper=OpenAIWhisperDecoder,
     ),
     type_check=AbsDecoder,
     default="rnn",
@@ -251,7 +255,10 @@ class ASRTask(AbsTask):
             "--token_type",
             type=str,
             default="bpe",
-            choices=["bpe", "char", "word", "phn"],
+            choices=[
+                "bpe", "char", "word", "phn",
+                "whisper_en", "whisper_multilingual"
+            ],
             help="The text will be tokenized " "in the specified level token",
         )
         group.add_argument(
@@ -268,7 +275,8 @@ class ASRTask(AbsTask):
         group.add_argument(
             "--cleaner",
             type=str_or_none,
-            choices=[None, "tacotron", "jaconv", "vietnamese"],
+            choices=[None, "tacotron", "jaconv", "vietnamese", \
+                     "whisper_en", "whisper_basic"],
             default=None,
             help="Apply text cleaning",
         )
@@ -399,6 +407,12 @@ class ASRTask(AbsTask):
     @classmethod
     def build_model(cls, args: argparse.Namespace) -> ESPnetASRModel:
         assert check_argument_types()
+        if "whisper" in args.token_list:
+            use_whisper_vocab = True
+            whisper_type = "en" if "whisper_en" in args.token_list \
+                           else "multilingual"
+        else:
+            use_whisper_vocab = False
         if isinstance(args.token_list, str):
             with open(args.token_list, encoding="utf-8") as f:
                 token_list = [line.rstrip() for line in f]
@@ -409,7 +423,14 @@ class ASRTask(AbsTask):
             token_list = list(args.token_list)
         else:
             raise RuntimeError("token_list must be str or list")
-        vocab_size = len(token_list)
+
+        if use_whisper_vocab:
+            vocab_size = 51865 if whisper_type == "multilingual" \
+                               else 51864
+            token_list.extend(['()' for _ in range(vocab_size - len(token_list))])
+            args.token_list = list(token_list)
+        else:
+            vocab_size = len(token_list)
         logging.info(f"Vocabulary size: {vocab_size }")
 
         # 1. frontend
