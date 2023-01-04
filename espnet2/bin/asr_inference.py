@@ -11,6 +11,12 @@ import torch
 import torch.quantization
 from typeguard import check_argument_types, check_return_type
 
+from espnet2.asr.context_aware import (
+    CABatchBeamSearch,
+    CABeamSearch,
+    ContextAwareASRModel,
+)
+
 from espnet2.asr.transducer.beam_search_transducer import BeamSearchTransducer
 from espnet2.asr.transducer.beam_search_transducer import (
     ExtendedHypothesis as ExtTransHypothesis,
@@ -181,7 +187,16 @@ class Speech2Text:
                 ngram=ngram_weight,
                 length_bonus=penalty,
             )
-            beam_search = BeamSearch(
+            
+            # add
+            if isinstance(asr_model, ContextAwareASRModel):
+                beam_search_class = CABeamSearch
+                use_context = True
+            else:
+                beam_search_class = BeamSearch
+                use_context = False
+            
+            beam_search = beam_search_class(
                 beam_size=beam_size,
                 weights=weights,
                 scorers=scorers,
@@ -207,7 +222,7 @@ class Speech2Text:
                             "BatchBeamSearchOnlineSim implementation is selected."
                         )
                     else:
-                        beam_search.__class__ = BatchBeamSearch
+                        beam_search.__class__ = CABatchBeamSearch if use_context else BatchBeamSearch
                         logging.info("BatchBeamSearch implementation is selected.")
                 else:
                     logging.warning(
@@ -261,10 +276,14 @@ class Speech2Text:
         self.dtype = dtype
         self.nbest = nbest
         self.enh_s2t_task = enh_s2t_task
+        self.use_context = use_context # add
 
     @torch.no_grad()
     def __call__(
-        self, speech: Union[torch.Tensor, np.ndarray]
+        self,
+        speech: Union[torch.Tensor, np.ndarray],
+        context_tokens: Optional[torch.Tensor] = None,
+        context_features: Optional[torch.Tensor] = None,
     ) -> List[
         Tuple[
             Optional[str],
@@ -277,6 +296,8 @@ class Speech2Text:
 
         Args:
             data: Input speech data
+            context_tokens: Context tokens (B, N, D)
+            context_features: Encoded context tokens (B, N, D)
         Returns:
             text, token, token_int, hyp
 
@@ -287,11 +308,20 @@ class Speech2Text:
         if isinstance(speech, np.ndarray):
             speech = torch.tensor(speech)
 
+        if context_tokens is not None and hasattr(self.asr_model, 'context_encoder'):
+            context_features = self.asr_model.context_encoder(context_tokens)
+
         # data: (Nsamples,) -> (1, Nsamples)
         speech = speech.unsqueeze(0).to(getattr(torch, self.dtype))
         # lengths: (1,)
         lengths = speech.new_full([1], dtype=torch.long, fill_value=speech.size(1))
-        batch = {"speech": speech, "speech_lengths": lengths}
+        batch = {
+            "speech": speech,
+            "speech_lengths": lengths,
+        }
+        if context_features is not None:
+            batch['context_features'] = context_features
+        
         logging.info("speech length: " + str(speech.size(1)))
 
         # a. To device
@@ -324,12 +354,20 @@ class Speech2Text:
             assert len(enc) == 1, len(enc)
 
             # c. Passed the encoder result and the beam search
-            results = self._decode_single_sample(enc[0])
+            # add context_features
+            decode_args = {"enc": enc[0]}
+            if context_features is not None:
+                decode_args["ct"] = context_features
+            results = self._decode_single_sample(**decode_args)
             assert check_return_type(results)
 
         return results
 
-    def _decode_single_sample(self, enc: torch.Tensor):
+    def _decode_single_sample(
+        self,
+        enc: torch.Tensor,
+        ct: torch.Tensor = None,
+    ):
         if self.beam_search_transducer:
             logging.info("encoder output length: " + str(enc.shape[0]))
             nbest_hyps = self.beam_search_transducer(enc)
@@ -343,9 +381,15 @@ class Speech2Text:
                 "best hypo: " + "".join(self.converter.ids2tokens(best.yseq[1:])) + "\n"
             )
         else:
+            ## add and change
+            beam_kwargs = {"x":enc, "maxlenratio": self.maxlenratio, "minlenratio": self.minlenratio}
+            if self.use_context:
+                beam_kwargs.update({"ct": ct.squeeze(0)})
+            
             nbest_hyps = self.beam_search(
-                x=enc, maxlenratio=self.maxlenratio, minlenratio=self.minlenratio
+                **beam_kwargs,
             )
+            
 
         nbest_hyps = nbest_hyps[: self.nbest]
 

@@ -18,6 +18,13 @@ from espnet2.asr.decoder.transformer_decoder import (
     LightweightConvolutionTransformerDecoder,
     TransformerDecoder,
 )
+from espnet2.asr.context_aware import (
+    AbsContextEncoder,
+    RobertaContextEncoder,
+    CAConformerEncoder,
+    CATransformerDecoder,
+    ContextAwareASRModel,
+) 
 from espnet2.asr.decoder.whisper_decoder import OpenAIWhisperDecoder
 from espnet2.asr.encoder.abs_encoder import AbsEncoder
 from espnet2.asr.encoder.branchformer_encoder import BranchformerEncoder
@@ -71,6 +78,7 @@ from espnet2.utils.get_default_kwargs import get_default_kwargs
 from espnet2.utils.nested_dict_action import NestedDictAction
 from espnet2.utils.types import float_or_none, int_or_none, str2bool, str_or_none
 
+
 frontend_choices = ClassChoices(
     name="frontend",
     classes=dict(
@@ -107,10 +115,12 @@ model_choices = ClassChoices(
     classes=dict(
         espnet=ESPnetASRModel,
         maskctc=MaskCTCModel,
+        caespnet=ContextAwareASRModel,
     ),
     type_check=AbsESPnetModel,
     default="espnet",
 )
+
 preencoder_choices = ClassChoices(
     name="preencoder",
     classes=dict(
@@ -125,6 +135,7 @@ encoder_choices = ClassChoices(
     "encoder",
     classes=dict(
         conformer=ConformerEncoder,
+        caconformer=CAConformerEncoder,
         transformer=TransformerEncoder,
         contextual_block_transformer=ContextualBlockTransformerEncoder,
         contextual_block_conformer=ContextualBlockConformerEncoder,
@@ -153,6 +164,7 @@ decoder_choices = ClassChoices(
     "decoder",
     classes=dict(
         transformer=TransformerDecoder,
+        catransformer=CATransformerDecoder,
         lightweight_conv=LightweightConvolutionTransformerDecoder,
         lightweight_conv2d=LightweightConvolution2DTransformerDecoder,
         dynamic_conv=DynamicConvolutionTransformerDecoder,
@@ -166,6 +178,14 @@ decoder_choices = ClassChoices(
     default="rnn",
 )
 
+context_encoder_choices = ClassChoices(
+    "context_encoder",
+    classes=dict(
+        roberta=RobertaContextEncoder,
+    ),
+    type_check=AbsContextEncoder,
+    default="roberta",
+)
 
 class ASRTask(AbsTask):
     # If you need more than one optimizers, change this value
@@ -406,6 +426,7 @@ class ASRTask(AbsTask):
 
     @classmethod
     def build_model(cls, args: argparse.Namespace) -> ESPnetASRModel:
+        #print(args.encoder_biasing_layer_conf)
         assert check_argument_types()
         if "whisper" in args.token_list:
             use_whisper_vocab = True
@@ -471,7 +492,18 @@ class ASRTask(AbsTask):
 
         # 4. Encoder
         encoder_class = encoder_choices.get_class(args.encoder)
-        encoder = encoder_class(input_size=input_size, **args.encoder_conf)
+        encoder_biasing_layer_conf = getattr(args, 'encoder_biasing_layer_conf', None)
+        if encoder_biasing_layer_conf is not None:    
+            encoder = encoder_class(
+                biasing_layer_config=encoder_biasing_layer_conf,
+                input_size=input_size,
+                **args.encoder_conf,
+            )
+        else:
+            encoder = encoder_class(
+                input_size=input_size,
+                **args.encoder_conf,
+            )
 
         # 5. Post-encoder block
         # NOTE(kan-bayashi): Use getattr to keep the compatibility
@@ -487,6 +519,7 @@ class ASRTask(AbsTask):
 
         # 5. Decoder
         decoder_class = decoder_choices.get_class(args.decoder)
+        decoder_biasing_layer_conf = getattr(args, 'decoder_biasing_layer_conf', None)
 
         if args.decoder == "transducer":
             decoder = decoder_class(
@@ -502,11 +535,19 @@ class ASRTask(AbsTask):
                 **args.joint_net_conf,
             )
         else:
-            decoder = decoder_class(
-                vocab_size=vocab_size,
-                encoder_output_size=encoder_output_size,
-                **args.decoder_conf,
-            )
+            if decoder_biasing_layer_conf is not None:
+                decoder = decoder_class(
+                    biasing_layer_config=decoder_biasing_layer_conf,
+                    vocab_size=vocab_size,
+                    encoder_output_size=encoder_output_size,
+                    **args.decoder_conf,
+                )
+            else:
+                decoder = decoder_class(
+                    vocab_size=vocab_size,
+                    encoder_output_size=encoder_output_size,
+                    **args.decoder_conf,
+                )
 
             joint_network = None
 
@@ -520,20 +561,41 @@ class ASRTask(AbsTask):
             model_class = model_choices.get_class(args.model)
         except AttributeError:
             model_class = model_choices.get_class("espnet")
-        model = model_class(
-            vocab_size=vocab_size,
-            frontend=frontend,
-            specaug=specaug,
-            normalize=normalize,
-            preencoder=preencoder,
-            encoder=encoder,
-            postencoder=postencoder,
-            decoder=decoder,
-            ctc=ctc,
-            joint_network=joint_network,
-            token_list=token_list,
-            **args.model_conf,
-        )
+        
+        if isinstance(model_class, ContextAwareASRModel):
+            context_encoder = None
+            if args.use_context_encoder:
+                context_encoder = context_encoder_choices.get_class(args.context_encoder)
+            model = model_class(
+                vocab_size=vocab_size,
+                frontend=frontend,
+                specaug=specaug,
+                normalize=normalize,
+                context_encoder=context_encoder,
+                preencoder=preencoder,
+                encoder=encoder,
+                postencoder=postencoder,
+                decoder=decoder,
+                ctc=ctc,
+                joint_network=joint_network,
+                token_list=token_list,
+                **args.model_conf,
+            )
+        else:
+            model = model_class(
+                vocab_size=vocab_size,
+                frontend=frontend,
+                specaug=specaug,
+                normalize=normalize,
+                preencoder=preencoder,
+                encoder=encoder,
+                postencoder=postencoder,
+                decoder=decoder,
+                ctc=ctc,
+                joint_network=joint_network,
+                token_list=token_list,
+                **args.model_conf,
+            )
 
         # FIXME(kamo): Should be done in model?
         # 8. Initialize
