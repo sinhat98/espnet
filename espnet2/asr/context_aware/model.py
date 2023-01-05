@@ -15,7 +15,7 @@ from espnet.nets.pytorch_backend.transformer.add_sos_eos import add_sos_eos
 class ContextAwareASRModel(ESPnetASRModel):
     def __init__(
         self,
-        context_encoder: Optional[AbsContextEncoder] = None,
+        context_encoder: AbsContextEncoder = None,
         *args,
         **kwargs
     ):
@@ -28,8 +28,8 @@ class ContextAwareASRModel(ESPnetASRModel):
         speech_lengths: torch.Tensor,
         text: torch.Tensor,
         text_lengths: torch.Tensor,
-        context_tokens: Optional[torch.Tensor],
-        context_features: Optional[torch.Tensor],
+        context_tokens: torch.Tensor = None,
+        context_features: torch.Tensor = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """Frontend + Encoder + Decoder + Calc loss
@@ -39,6 +39,8 @@ class ContextAwareASRModel(ESPnetASRModel):
             speech_lengths: (Batch, )
             text: (Batch, Length)
             text_lengths: (Batch,)
+            context_tokens: (Batch, n_context_tokens,)
+            context_features: (Batch, n_context_tokens, n_state)
             kwargs: "utt_id" is among the input.
         """
         assert text_lengths.dim() == 1, text_lengths.shape
